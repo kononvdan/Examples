@@ -1,0 +1,130 @@
+#include <pthread.h>
+#include <iostream>
+#include <ctime>
+#include <cstdlib>
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#define N 4
+
+pthread_barrier_t bar1;
+
+struct Args
+{
+    int *array;
+};
+
+void print(int *arr)
+{
+    std::cout << "[";
+    for (size_t i = 0; i < N; i++)
+    {
+        std::cout << arr[i] << ",";
+    }
+    std::cout << "]" << std::endl;
+}
+
+void *infill_array(Args *args)
+{
+
+    for (size_t i = 0; i < N; i++)
+    {
+        args->array[i] = (rand() % 100);
+    }
+
+    return nullptr;
+}
+
+bool isIn(int *arr, int value)
+{
+
+    for (size_t i = 0; i < N; i++)
+    {
+        if (arr[i] == value)
+            return true;
+    }
+    return false;
+}
+
+bool satisfy(int *arr1, int *arr2)
+{
+
+    int amount1 = 0;
+    for (size_t i = 0; i < N; i++)
+    {
+        if (isIn(arr2, arr1[i]))
+        {
+            amount1 += 1;
+        }
+    }
+    int amount2 = 0;
+    for (size_t i = 0; i < N; i++)
+    {
+        if (isIn(arr1, arr2[i]))
+        {
+            amount2 += 1;
+        }
+    }
+    if (amount1 >= N / 2 && amount2 >= N / 2)
+        return true;
+    return false;
+}
+
+int main()
+{
+    MPI_Init(0, 0);
+    int size, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    srand(1 + rank);
+
+    Args args;
+    int arr1[N];
+    int buff1[N];
+    int buff2 = false;
+    args.array = arr1;
+
+    MPI_Status status;
+    do
+    {
+        infill_array(&args);
+        if (rank == 0)
+        {
+            MPI_Recv((void *)&buff1, N, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+            buff2 = satisfy(arr1, buff1);
+
+            MPI_Send((void *)&buff2, 1, MPI_INT, 1, 1, MPI_COMM_WORLD);
+        }
+        else
+        {
+            MPI_Send((void *)&arr1, N, MPI_INT, 0, 0, MPI_COMM_WORLD);
+
+            MPI_Recv((void *)&buff2, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+        }
+
+    } while (!buff2);
+
+    if (rank == 0)
+    {
+
+        print(arr1);
+        print(buff1);
+
+        FILE *file = fopen("./result.txt", "w");
+        std::string output = "";
+        for (size_t i = 0; i < N; i++)
+        {
+            output += std::to_string(arr1[i]) + ",";
+        }
+        output += '\n';
+        for (size_t i = 0; i < N; i++)
+        {
+            output += std::to_string(buff1[i]) + ",";
+        }
+        fputs(output.c_str(), file);
+        fclose(file);
+    }
+    MPI_Finalize();
+    return 0;
+}
