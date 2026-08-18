@@ -1,0 +1,275 @@
+#include <pthread.h>
+#include "iostream"
+#include <pthread.h>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+#include <unistd.h> 
+
+#define N 10
+#define AMOUNT_OF_ORDERS 40
+
+enum OrderType
+{
+    REPAIR,
+    NEW_FROM_OWNERS_MATERIALS,
+    NEW_FROM_CUSTOMERS_MATERIALS
+};
+
+enum MaterialType
+{
+    SILK,
+    LAETHER
+};
+
+
+static unsigned int last_order_id = 0;
+
+struct Material
+{
+    unsigned int amount;
+    MaterialType type;
+    float price;
+    pthread_mutex_t is_busy;
+};
+
+struct Order
+{
+    unsigned int id;
+    OrderType type;
+    float income;
+    MaterialType required_material;
+    unsigned int required_material_amount;
+    double duration;
+
+    Order()
+    {
+        id = last_order_id;
+        last_order_id++;
+        type = static_cast<OrderType>(rand() % 3);
+        income = rand() % 10001;
+        required_material = static_cast<MaterialType>(rand() % 2);
+        required_material_amount = (type == OrderType::NEW_FROM_CUSTOMERS_MATERIALS ? 0 : rand() % 10);
+        duration = rand() % 10 * (type == OrderType::REPAIR ? 1 : 2);
+    }
+};
+
+struct Args {
+    unsigned int id;
+};
+
+template <typename T>
+struct SafeVector
+{
+    std::vector<T> vector;
+    pthread_mutex_t is_busy;
+};
+
+static float money;
+static pthread_mutex_t money_is_busy;
+static SafeVector<Order> orders;
+static Material silk;
+static Material laether;
+
+void generate_orders(SafeVector<Order> &list_to_fill, unsigned int amount)
+{
+    for (unsigned int i = 0; i < amount; ++i)
+    {
+        list_to_fill.vector.push_back(Order());
+    }
+}
+
+void print_order(Order & order);
+void execute_order(Order & order) {
+    int delta;
+    if (order.type != OrderType::NEW_FROM_OWNERS_MATERIALS) {
+        if (order.required_material == MaterialType::SILK) {
+            silk.amount -= order.required_material_amount; 
+        } else if(order.required_material == MaterialType::LAETHER) {
+            laether.amount -= order.required_material_amount;
+        }
+    } else {
+        if (order.required_material == MaterialType::SILK) {
+            delta = silk.amount - order.required_material_amount;
+            if (delta > 0) {
+                silk.amount -= order.required_material_amount;
+            } else {
+                silk.amount = 0;
+                money = -delta * silk.price;
+            }
+        } else if(order.required_material == MaterialType::LAETHER) {
+            delta = laether.amount - order.required_material_amount;
+            if (delta > 0) {
+                laether.amount -= order.required_material_amount;
+            } else {
+                laether.amount = 0;
+                money = -delta * laether.price;
+            }
+        }
+    }
+    std::cout << "Sleeping " <<order.duration * 10 << std::endl;
+    usleep(order.duration * 10);
+    std::cout << "Increasing money" << std::endl;
+    money += order.income;
+
+    std::cout << "Releasing variables" << std::endl;
+    pthread_mutex_unlock(&silk.is_busy);
+    pthread_mutex_unlock(&laether.is_busy);
+    pthread_mutex_unlock(&money_is_busy);
+    pthread_mutex_unlock(&orders.is_busy);
+    std::cout << "Order complete" << std::endl;
+}
+
+void print_orders(SafeVector<Order> &orders);
+
+void * do_work(void * args)
+{
+    std::cout << "Starting work" << std::endl;
+    bool run = true;
+    while (run) {
+        // std::cout << "Trying to lock" << std::endl;
+        int o = pthread_mutex_trylock(&orders.is_busy);
+        int s = pthread_mutex_trylock(&silk.is_busy);
+        int l = pthread_mutex_trylock(&laether.is_busy);
+        int m = pthread_mutex_trylock(&money_is_busy);
+        if (
+            o == 0
+            &
+            s == 0
+            &
+            l == 0
+            &
+            m == 0
+        ) {
+            // std::cout << "I'm "<< _args->id << " " << "Could lock";
+            size_t order_number = -1;
+            Order _order;
+            for (auto order = orders.vector.begin(); order != orders.vector.end(); order++) {
+                if (
+                    order->type == OrderType::NEW_FROM_CUSTOMERS_MATERIALS && orders.vector.size() != 0
+                    ||
+                    (
+                        order->required_material == MaterialType::SILK
+                        &&
+                        (
+                            order->required_material_amount <= silk.amount
+                            ||
+                            money - (silk.price * -(silk.amount - order->required_material_amount)) >= 0
+                        )
+                    )
+                    ||
+                    (
+                        order->required_material == MaterialType::LAETHER
+                        &&
+                        (
+                            order->required_material_amount <= laether.amount
+                            ||
+                            money - (laether.price * -(laether.amount - order->required_material_amount)) >= 0
+                        )
+                    )
+                ) {
+                    std::cout << " and executing order ";
+                    order_number = std::distance(orders.vector.begin(), order);
+                    _order = orders.vector[order_number];
+                    orders.vector.erase(order);
+                    print_order(_order);
+                    break;
+                } else {
+                    std::cout << " but there is no suitable order for now";
+                }
+            }
+            std::cout  << std::endl;
+
+            if (order_number >= 0) {
+                std::cout << "Entering execution function" << std::endl;
+                execute_order(_order);
+            }
+            if (orders.vector.size() <= 0) {
+                run = false;
+                std::cout << "!!!The vector is empty" << std::endl;
+            } else {
+                std::cout << "!!!There are still orders in vector" << std::endl;
+                // print_orders(orders);
+                std::cout << silk.amount <<std::endl;
+                std::cout << laether.amount <<std::endl;
+                std::cout << money <<std::endl;
+            }
+            pthread_mutex_unlock(&orders.is_busy);
+            pthread_mutex_unlock(&silk.is_busy);
+            pthread_mutex_unlock(&laether.is_busy);
+            pthread_mutex_unlock(&money_is_busy);
+            std::cout << "Released all the mutexes" << std::endl;
+
+        } else {
+            // std::cout << "Couldn't lock" << std::endl;
+            usleep(rand() % 10);
+            std::cout << s << l << m << o <<std::endl;
+        }
+    }
+
+    std::cout << "End of work" << std::endl;
+    return nullptr;
+}
+
+void print_orders(SafeVector<Order> &orders)
+{
+    for (auto order = orders.vector.begin(); order != orders.vector.end(); ++order)
+    {
+        std::cout << "ID: " << order->id <<
+        " Type: " << (order->type == OrderType::REPAIR ? "REPAIR" : (order->type == OrderType::NEW_FROM_OWNERS_MATERIALS ? "NEW_FROM_OWNERS_MATERIALS" : "NEW_FROM_CUSTOMERS_MATERIALS")) <<
+        " Income: " << order->income <<
+        " RequiredMaterial: " << (order->required_material == MaterialType::SILK ? "SILK" : "LAETHER") <<
+        " RequiredMaterialAmount: " << order->required_material_amount <<
+        " Duration: " << order->duration << std::endl;
+    }
+}
+
+void print_order(Order & order) {
+    std::cout << "ID: " << order.id <<
+        " Type: " << (order.type == OrderType::REPAIR ? "REPAIR" : (order.type == OrderType::NEW_FROM_OWNERS_MATERIALS ? "NEW_FROM_OWNERS_MATERIALS" : "NEW_FROM_CUSTOMERS_MATERIALS")) <<
+        " Income: " << order.income <<
+        " RequiredMaterial: " << (order.required_material == MaterialType::SILK ? "SILK" : "LAETHER") <<
+        " RequiredMaterialAmount: " << order.required_material_amount <<
+        " Duration: " << order.duration;
+}
+
+int main()
+{
+    srand(time(0));
+
+    money = rand() % 10000;
+    pthread_mutex_init(&money_is_busy, NULL);
+
+    silk.amount = rand() % 1000;
+    silk.type = MaterialType::SILK;
+    silk.price = rand() % 1000;
+    pthread_mutex_init(&silk.is_busy, NULL);
+
+    laether.amount = rand() % 1000;
+    laether.type = MaterialType::LAETHER;
+    laether.price = rand() % 1000;
+    pthread_mutex_init(&laether.is_busy, NULL);
+    
+    orders = SafeVector<Order>();
+    pthread_mutex_init(&orders.is_busy, NULL);
+
+    pthread_t workers[N];
+
+    generate_orders(orders, AMOUNT_OF_ORDERS);
+
+    std::cout << "__________START__________" << std::endl;
+    // print_orders(orders);
+    std::cout << std::endl;
+
+    void *result;
+    for (auto i = 0; i < N; ++i)
+    {
+        std::cout << "Starting thread "<< std::endl;
+        pthread_create(&workers[i], NULL, do_work, (NULL));
+    }
+
+    for (auto i = 0; i < N; ++i)
+    {
+        pthread_join(workers[i], (void **)&result);
+    }
+}
