@@ -1,0 +1,86 @@
+#include "iostream"
+#include <pthread.h>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+#include <math.h>
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int numbers[100];
+
+struct Bound {
+    int begin;
+    int end;
+};
+
+struct Args {
+    int id;
+    struct Bound * bound;
+    std::vector<int> * vec;
+};
+
+bool isPrime(int n) {
+    if (n < 2) { 
+        return false;
+    }
+
+    for (int i = 2; i <= std::sqrt(n); ++i) {
+        if (n % i == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void printVector(const std::vector<int>& vec) {
+    for (int val : vec) {
+        std::cout << val << " ";
+    }
+    std::cout << std::endl;
+}
+
+void * search(void * Args) {
+    struct Args * args = (struct Args *) Args;
+
+    for(int i = args -> bound -> begin; i <= args-> bound -> end; i++ ) {
+        if( isPrime(((int) sqrt(numbers[i]))) && ((int) sqrt(numbers[i])) == sqrt(numbers[i]) ) {
+            args -> vec -> push_back(numbers[i]);
+        }
+    }
+    return (void *) 0;
+}
+
+int main() {
+    MPI_Init(0,0);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    std::cout << "Rank " << rank << std::endl;
+
+    srand(static_cast<unsigned int>(time(0)));
+
+    for( unsigned i = 0; i < sizeof(numbers)/sizeof(int); i++) {
+        int random = (rand() % 100) + 1;
+        numbers[i] = random * random;
+    }
+
+
+    struct Bound b1;
+    b1.begin = sizeof(numbers)/sizeof(int) / size * rank;
+    b1.end = sizeof(numbers)/sizeof(int) / size * (rank + 1);
+
+    std::vector<int> vec1;
+    struct Args a1;
+    
+    a1.bound = &b1;
+    a1.vec = &vec1;
+
+    search((void *) &a1);
+
+    printVector(vec1);
+
+    MPI_Finalize();
+    return 0;
+}
