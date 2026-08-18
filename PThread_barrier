@@ -1,0 +1,111 @@
+#include <pthread.h>
+#include <iostream>
+#include <ctime>
+#include <cstdlib>
+#define N 10
+
+pthread_barrier_t bar1;
+
+struct Args
+{
+    int * array;
+};
+
+void print(int * arr) {
+    std::cout << "[";
+    for (size_t i = 0; i < N; i++)
+    {
+        std::cout << arr[i]<<",";
+    }
+    std::cout << "]" << std::endl;
+}
+
+void * infill_array(void * _args)
+{
+
+    Args *args = (Args *)_args;
+
+    for (size_t i = 0; i < N; i++)
+    {
+        args->array[i] = (rand() % 100);
+    }
+
+    pthread_barrier_wait(&bar1);
+    return nullptr;
+}
+
+bool isIn(int * arr,int value) {
+
+    for(size_t i = 0; i < N; i++) {
+        if (arr[i] == value) return true;
+    }
+    return false;
+}
+
+bool satisfy(int *arr1, int *arr2)
+{
+
+    int amount1 = 0;
+    for (size_t i = 0; i < N; i++)
+    {
+        if (isIn(arr2, arr1[i]))
+        {
+            amount1 += 1;
+        }
+    }
+    int amount2 = 0;
+    for (size_t i = 0; i < N; i++)
+    {
+        if (isIn(arr1, arr2[i]))
+        {
+            amount2 += 1;
+        }
+    }
+    // std::cout << (amount1 >= N / 2 && amount2 <= N / 2) << std::endl;
+    if (amount1 >= N / 2 && amount2 >= N / 2) return true;
+    return false;
+}
+
+
+
+int main()
+{
+    srand(static_cast<unsigned int>(time(0)));
+    pthread_barrier_init(&bar1, NULL, 3);
+
+    pthread_t threads[2];
+    Args args[2];
+    int arr1[N];
+    int arr2[N];
+    args[0].array = arr1;
+    args[1].array = arr2;
+
+
+    void * result;
+    do
+    {
+        pthread_create(&threads[0], NULL, infill_array, (void *)&args[0]);
+        pthread_create(&threads[1], NULL, infill_array, (void *)&args[1]);
+
+        pthread_barrier_wait(&bar1);
+
+
+    } while (!satisfy(arr1, arr2));
+
+    print(arr1);
+    print(arr2);
+
+    FILE * file = fopen("./result.txt", "w");
+    std::string output = "";
+    for(size_t i = 0; i < N; i++) {
+        output += std::to_string(arr1[i]) + ",";
+    }
+    output += '\n';
+    for(size_t i = 0; i < N; i++) {
+        output += std::to_string(arr2[i]) + ",";
+    }
+    fputs(output.c_str(), file);
+    fclose(file);
+
+    return 0;
+}
