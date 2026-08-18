@@ -1,0 +1,301 @@
+#include <iostream>
+#include <cuda.h>
+#include <ctime>
+#include <curand_kernel.h>
+#include <math.h>
+#include <stdio.h>
+#include "locale.h"
+#include "CL/cl.h"
+
+#define S 3
+#define e 0.01
+
+#define s 3
+
+#define BLOCKS 1
+
+const char *opencl_source = "\n\
+#define S 10 \n\
+#define s 3 \n\
+#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable\n\
+#pragma OPENCL EXTENSION cl_khr_local_int32_base_atomics : enable\n\
+#pragma OPENCL EXTENSION cl_khr_global_int32_extended_atomics : enable\n\
+#pragma OPENCL EXTENSION cl_khr_local_int32_extended_atomics : enable\n\
+#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable\n\
+#pragma OPENCL EXTENSION cl_khr_int64_extended_atomics : enable\n\
+float randomf(unsigned int seed) {\n\
+    return (sqrt((float)seed));\n\
+}\n\
+__kernel void InfillArray( __global float *A, __global int * Index) {\n\
+        int gid = atom_add(Index, 1);\n\
+        //int gid = *Index; \n\
+        //Index = *Index += 1; \n\
+    A[gid] = randomf(gid);\n\
+}\n\
+__kernel void UpdateArray( __global float *A) {\n\
+    float sum = 0;\n\
+    float self = A[get_group_id(0)*get_local_size(0) + get_local_id(0)];\n\
+    int idx = get_group_id(0)*get_local_size(0) + get_local_id(0);\n\
+    int col = idx % S;\n\
+    int row = idx / S;\n\
+    float nums[9] = {0};\n\
+    for (int r = -1; r <= 1; r++)\n\
+    {\n\
+        for (int c = -1; c <= 1; c++)\n\
+        {\n\
+            int id = (r + 1) * s + (c + 1);\n\
+            int new_row = row + r;\n\
+            int new_col = col + c;\n\
+            if (new_row < 0 || new_row >= S || new_col < 0 || new_col >= S)\n\
+            {\n\
+                nums[id] = self;\n\
+            }\n\
+            else\n\
+            {\n\
+                nums[id] = A[(new_row)*S + (new_col)];\n\
+            }\n\
+        }\n\
+    }\n\
+    for (int i = 0; i < 9; i++)\n\
+        sum += nums[i];\n\
+    barrier(CLK_GLOBAL_MEM_FENCE); \n\
+    A[get_group_id(0) * get_local_size(0) + get_local_id(0)] = sum / 9;\n\
+}\n\
+\n ";
+void print_array(float *A)
+{
+    for (int r = 0; r < S; r++)
+    {
+        for (int c = 0; c < S; c++)
+        {
+            std::cout << A[r * S + c] << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+float find_mm(float *A, bool max)
+{
+    float result = A[0];
+    if (max)
+    {
+        for (int i = 1; i < S * S; i++)
+        {
+            if (A[i] > result)
+                result = A[i];
+        }
+    }
+    else
+    {
+        for (int i = 1; i < S * S; i++)
+        {
+            if (A[i] < result)
+                result = A[i];
+        }
+    }
+    return result;
+}
+
+int main(int argc, char **argv)
+{
+
+    float *A;
+    A = new float[S * S];
+    cl_mem for_gpu_A;
+    cl_mem for_gpu_A_Index;
+
+    cl_uint num_platforms;
+
+    cl_int arg_int = clGetPlatformIDs(0, nullptr, &num_platforms);
+
+    cl_platform_id *platforms = new cl_platform_id[num_platforms];
+    arg_int = clGetPlatformIDs(num_platforms, platforms, nullptr);
+
+    cl_uint num_devices;
+    arg_int = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_ALL, 0, nullptr, &num_devices);
+
+    cl_device_id *devices = new cl_device_id[num_devices];
+    arg_int = clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_ALL, num_devices, devices, nullptr);
+
+    cl_context_properties properties[3] = {
+        CL_CONTEXT_PLATFORM,
+        (cl_context_properties)platforms[0],
+        0};
+
+    cl_context context = clCreateContext(properties, num_devices, devices, NULL, NULL, &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания контекста %d", arg_int);
+        return -1;
+    }
+
+    cl_program opencl_program = clCreateProgramWithSource(context, 1, &opencl_source, NULL, &arg_int);
+
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания программного объекта %d", arg_int);
+        return -1;
+    }
+
+    // компиляция и сборка программного объекта для 1 OpenCL устройства
+    arg_int = clBuildProgram(opencl_program, 1, devices, NULL, NULL, NULL);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка компиляции или сборки программы\n");
+
+        size_t log_size;
+        clGetProgramBuildInfo(opencl_program, devices[0], CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char *log = (char *)malloc(log_size);
+        clGetProgramBuildInfo(opencl_program, devices[0], CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        printf("Build log:\n%s\n", log);
+        free(log);
+
+        return -1;
+    }
+
+    cl_command_queue command_queue = clCreateCommandQueue(context,
+                                                          devices[0], 0, &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания очереди команд");
+        return -1;
+    }
+
+    cl_kernel kernel = clCreateKernel(opencl_program, "InfillArray", &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания объекта ядра");
+        return -1;
+    }
+
+    cl_kernel kernel_update = clCreateKernel(opencl_program, "UpdateArray", &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания объекта ядра");
+        return -1;
+    }
+
+    for_gpu_A = clCreateBuffer(context, CL_MEM_READ_WRITE, S * S * sizeof(float), NULL, &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания объекта памяти");
+        return -1;
+    }
+    for_gpu_A_Index = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(int), NULL, &arg_int);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка создания объекта памяти");
+        return -1;
+    }
+
+    arg_int = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&for_gpu_A);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка вызова clSetKernelArg %d", arg_int);
+        return -1;
+    }
+    arg_int = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&for_gpu_A_Index);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка вызова clSetKernelArg %d", arg_int);
+        return -1;
+    }
+
+    cl_uint dim = 1;
+    size_t SIZE[3];
+    arg_int = clGetKernelWorkGroupInfo(kernel, devices[0],
+                                       CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), (void *)&SIZE[0],
+                                       NULL);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка вызова clGetKernelWorkGroupInfo %d", arg_int);
+        return -1;
+    }
+    else
+    {
+        printf("\nМаксим-е кол-во рабочих элементов в одной группе=%ld\n",
+               SIZE[0]);
+    }
+
+    arg_int = clGetKernelWorkGroupInfo(kernel, devices[0],
+                                       CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+                                       sizeof(size_t), (void *)&SIZE[0], NULL);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("Ошибка вызова clGetKernelWorkGroupInfo\n");
+        return -1;
+    }
+    else
+    {
+        printf("Рекомендованное кратное для кол-ва рабочих элементов вгруппе=%ld\n", SIZE[0]);
+    }
+
+    arg_int = clEnqueueNDRangeKernel(command_queue, kernel, dim, NULL, SIZE, SIZE, 0, 0, 0);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка запуска ядра %d", arg_int);
+        return -1;
+    }
+
+    arg_int = clFinish(command_queue);
+    if (arg_int != CL_SUCCESS)
+    {
+        printf("\nОшибка завершения ядра");
+        return -1;
+    }
+
+    do
+    {
+
+        arg_int = clEnqueueReadBuffer(command_queue, for_gpu_A, CL_TRUE, 0,
+                                      S * S * sizeof(float), (void *)A, 0, NULL, NULL);
+        if (arg_int != CL_SUCCESS)
+        {
+            printf("\nОшибка вызова clEnqueueWriteBuffer (mem_for_CPU->mem_for_GPU)");
+            return -1;
+        }
+
+        print_array(A);
+        if (find_mm(A, true) - find_mm(A, false) < e)
+        {
+            break;
+        }
+
+        // OpenCL тут
+        arg_int = clSetKernelArg(kernel_update, 0, sizeof(cl_mem), (void *)&for_gpu_A);
+        if (arg_int != CL_SUCCESS)
+        {
+            printf("\nОшибка вызова clSetKernelArg %d", arg_int);
+            return -1;
+        }
+
+        cl_uint dim = 1;
+        size_t SIZE[3];
+        arg_int = clGetKernelWorkGroupInfo(kernel_update, devices[0],
+                                           CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), (void *)&SIZE[0],
+                                           NULL);
+        if (arg_int != CL_SUCCESS)
+        {
+            printf("\nОшибка вызова clGetKernelWorkGroupInfo %d", arg_int);
+            return -1;
+        }
+
+        arg_int = clEnqueueNDRangeKernel(command_queue, kernel_update, dim, NULL, SIZE, SIZE, 0, 0, 0);
+        if (arg_int != CL_SUCCESS)
+        {
+            printf("\nОшибка запуска ядра %d", arg_int);
+            return -1;
+        }
+
+        arg_int = clFinish(command_queue);
+        if (arg_int != CL_SUCCESS)
+        {
+            printf("\nОшибка завершения ядра");
+            return -1;
+        }
+
+    } while (true);
+
+    return 0;
+}
