@@ -1,0 +1,196 @@
+#include <iostream>
+#include <cuda.h>
+#include <ctime>
+#include <curand_kernel.h>
+#include <math.h>
+#include <stdio.h>
+
+#define S 3
+#define e 0.1
+
+#define s 3
+
+#define THREADS S
+#define BLOCKS S
+
+// __host__ constexpr unsigned long long _s_var = (S * S - 1) * (S * S) / 2;
+
+__device__ float randomf(unsigned int seed)
+{
+    return (std::sqrt((float)seed));
+}
+
+__global__ void InfillArray(float *A)
+{
+    A[threadIdx.x + blockDim.x * blockIdx.x] = randomf(threadIdx.x + blockDim.x * blockIdx.x);
+}
+
+__global__ void UpdateArray(float *A, float *B)
+{
+    float sum = 0;
+    float self = A[threadIdx.x + blockDim.x * blockIdx.x];
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int col = idx % S;
+    int row = idx / S;
+    float nums[s * s] = {0};
+
+    for (int r = -1; r <= 1; r++)
+    {
+        for (int c = -1; c <= 1; c++)
+        {
+            int id = (r + 1) * s + (c + 1);
+            int new_row = row + r;
+            int new_col = col + c;
+            if (new_row < 0 || new_row >= S || new_col < 0 || new_col >= S)
+            {
+                nums[id] = self;
+            }
+            else
+            {
+                nums[id] = A[(new_row)*S + (new_col)];
+            }
+        }
+    }
+
+    // printf("=> %d - %f %f %f %f %f %f %f %f %f\n",idx, nums[0], nums[1], nums[2], nums[3], nums[4], nums[5], nums[6], nums[7], nums[8]);
+    for (int i = 0; i < s * s; i++)
+        sum += nums[i];
+    B[threadIdx.x + blockDim.x * blockIdx.x] = sum / 9;
+}
+
+__device__ void get_closest_index(unsigned int idx, int &offset_i, int &offset)
+{
+    for (int i = 0; i < S * S; i++)
+    {
+        if (i * (i + 1) / 2 > idx)
+        {
+            offset_i = i;
+            offset = idx - i * (i + 1) / 2;
+            return;
+        }
+    }
+}
+
+__global__ void SmartCheck(float *A, bool *B)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int offset_i = 0;
+    int offset = 0;
+    get_closest_index(idx, offset_i, offset);
+    // int row = idx/S;
+    // int col = idx%S;
+    // printf("row %d col %d | %d %d %d %d\n", row, col, idx, offset, offset_i, offset_i+offset);
+    // printf("%f %f\n", A[offset_i], A[offset_i+offset]);
+    B[idx] = std::abs(A[offset_i] - A[offset_i + offset]) < e;
+}
+
+__host__ void print_array(float *A)
+{
+    for (int r = 0; r < S; r++)
+    {
+        for (int c = 0; c < S; c++)
+        {
+            std::cout << A[r * S + c] << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+// bool satisfy(bool *A)
+// {
+//     for (int i = 0; i < _s_var; i++)
+//     {
+//         if (!A[i])
+//             return false;
+//     }
+//     return true;
+// }
+
+float find_mm(float *A, bool max)
+{
+    float result = A[0];
+    if (max)
+    {
+        for (int i = 1; i < S * S; i++)
+        {
+            if (A[i] > result)
+                result = A[i];
+        }
+    }
+    else
+    {
+        for (int i = 1; i < S * S; i++)
+        {
+            if (A[i] < result)
+                result = A[i];
+        }
+    }
+    return result;
+}
+
+int main(int argc, char **argv)
+{
+
+    float *A;
+    A = new float[S * S];
+    float *for_gpu_A;
+    float *for_gpu_B;
+
+    // bool *check;
+    // check = new bool[_s_var];
+    // bool *for_gpu_check;
+
+    cudaMalloc((void **)&for_gpu_A, S * S * sizeof(float));
+    cudaMalloc((void **)&for_gpu_B, S * S * sizeof(float));
+    // cudaMalloc((void **)&for_gpu_check, _s_var * sizeof(bool));
+
+    InfillArray<<<dim3(BLOCKS), dim3(THREADS)>>>(for_gpu_A);
+    cudaDeviceSynchronize();
+    cudaMemcpy((void *)A, (void *)for_gpu_A, S * S * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    print_array(A);
+
+
+    std::cout << "infilled" << std::endl;
+
+    bool even = true;
+    int i = 0;
+    do
+    {
+        even = !even;
+        
+        if(even){
+            cudaMemcpy((void *)A, (void *)for_gpu_A, S * S * sizeof(float), cudaMemcpyDeviceToHost);
+        } else {
+            cudaMemcpy((void *)A, (void *)for_gpu_B, S * S * sizeof(float), cudaMemcpyDeviceToHost);
+        }
+        if (find_mm(A, true) - find_mm(A, false) < e && i != 0)
+        {
+            break;
+        }
+        i+=1;
+
+        if (even) {
+            UpdateArray<<<dim3(BLOCKS), dim3(THREADS)>>>(for_gpu_B, for_gpu_A);
+        } else {
+            UpdateArray<<<dim3(BLOCKS), dim3(THREADS)>>>(for_gpu_A, for_gpu_B);
+        }
+        cudaDeviceSynchronize();
+        
+    
+
+    } while (true);
+
+    if (even) {
+        cudaMemcpy((void *)A, (void *)for_gpu_A, S * S * sizeof(float), cudaMemcpyDeviceToHost);
+    } else {
+        cudaMemcpy((void *)A, (void *)for_gpu_B, S * S * sizeof(float), cudaMemcpyDeviceToHost);
+    }
+    print_array(A);
+
+    cudaFree(for_gpu_A);
+    cudaFree(for_gpu_B);
+
+    return 0;
+}
